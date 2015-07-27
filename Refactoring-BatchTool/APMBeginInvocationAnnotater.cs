@@ -1,10 +1,8 @@
 ﻿using System;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
-using Microsoft.CodeAnalysis.CSharp.Symbols;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using NLog;
-using Refactoring;
 using Utilities;
 
 namespace Refactoring_BatchTool

@@ -4,7 +4,6 @@ using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using NLog;
 using NUnit.Framework;
-using Refactoring;
 using System;
 using Utilities;
 

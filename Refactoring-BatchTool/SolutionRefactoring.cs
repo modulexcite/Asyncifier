@@ -1,13 +1,12 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using Microsoft.CodeAnalysis;
+﻿using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using NLog;
-using Refactoring;
-using Utilities;
+using System;
 using System.Collections.Generic;
+using System.Linq;
+using Utilities;
+using RoslynUtilities;
 
 namespace Refactoring_BatchTool
 {

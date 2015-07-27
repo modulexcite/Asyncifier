@@ -1,14 +1,17 @@
-using Microsoft.CodeAnalysis;
+﻿using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Symbols;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
+using Microsoft.CodeAnalysis.Simplification;
 using NLog;
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
 using Utilities;
 
-namespace Refactoring
+namespace Asyncifier
 {
     public static class APMToAsyncAwait
     {
@@ -16,6 +19,7 @@ namespace Refactoring
 
         private const string DefaultTaskName = "task";
         private const string DefaultLambdaParamName = "result";
+        private const string apmAnnotation = "RefactorableAPMInstance";
 
         /// <summary>
         /// Execute the APM-to-async/await refactoring for a given APM method invocation.
@@ -25,154 +29,149 @@ namespace Refactoring
         /// <param name="workspace">The workspace to which the code in the syntax tree currently belongs, for formatting purposes.</param>
         /// <param name="index">The index number </param>
         /// <returns>The CompilationUnitSyntax node that is the result of the transformation.</returns>
-        public static CompilationUnitSyntax RefactorAPMToAsyncAwait(Document document, Solution solution, Workspace workspace, int index)
+        public static async Task<Document> RefactorAPMToAsyncAwait(this Document document, CompilationUnitSyntax root, InvocationExpressionSyntax invocation, CancellationToken cancellationToken)
         {
-            if (document == null) throw new ArgumentNullException("document");
-            if (workspace == null) throw new ArgumentNullException("workspace");
-
-            String message;
-
-            var numErrorsInSolutionBeforeRewriting = solution.CompilationErrorCount();
-
-            var syntaxTree = (SyntaxTree)document.GetSyntaxTreeAsync().Result;
-            var syntax = (CompilationUnitSyntax)syntaxTree.GetRoot();
-
-            Logger.Trace("\n### REFACTORING CODE ###\n{0}\n### END OF CODE ###", syntax.Format(workspace));
-
-            InvocationExpressionSyntax beginXxxCall;
-            try
-            {
-                beginXxxCall = document.GetAnnotatedInvocation(index);
-            }
-            catch (InvalidOperationException)
-            {
-                throw new ArgumentException(
-                    "Syntax tree has no InvocationExpressionSyntax node annotated with RefactorableAPMInstance");
-            }
-
-            var model = (SemanticModel)document.GetSemanticModelAsync().Result;
-
-            var callbackArgument = FindAsyncCallbackInvocationArgument(model, beginXxxCall);
-            var callbackExpression = callbackArgument.Expression;
-
+            string message;
             CompilationUnitSyntax rewrittenSyntax;
-            switch (callbackExpression.Kind())
+
+            //var apmInvocation = document.GetAnnotatedInvocation();
+            //if (apmInvocation == null)
+            //{
+            //    return document;
+            //}
+
+            var apmInvocation = invocation.WithAdditionalAnnotations(new SyntaxAnnotation(apmAnnotation));
+            rewrittenSyntax = root.ReplaceNode(invocation, apmInvocation);
+
+            while (true)
             {
-                case SyntaxKind.SimpleLambdaExpression:
-                    var lambda = (SimpleLambdaExpressionSyntax)callbackExpression;
+                document = document.WithSyntaxRoot(rewrittenSyntax);
+                rewrittenSyntax = await document.GetSyntaxRootAsync() as CompilationUnitSyntax;
+                if (rewrittenSyntax == null)
+                {
+                    return document;
+                }
 
-                    switch (lambda.Body.Kind())
-                    {
-                        case SyntaxKind.Block:
-                            var stateArgument = FindAsyncStateInvocationArgument(model, beginXxxCall);
+                apmInvocation = rewrittenSyntax.GetAnnotatedNodes(apmAnnotation).OfType<InvocationExpressionSyntax>().FirstOrDefault();
+                if (apmInvocation == null)
+                {
+                    return document;
+                }
 
-                            switch (stateArgument.Expression.Kind())
-                            {
-                                case SyntaxKind.NullLiteralExpression:
-                                    Logger.Info("Refactoring:\n{0}", beginXxxCall.ContainingMethod());
+                var model = await document.GetSemanticModelAsync(cancellationToken);
+                if (model == null)
+                {
+                    return document;
+                }
 
-                                    return RefactorSimpleLambdaInstance(syntax, beginXxxCall, model, workspace, callbackArgument);
+                var symbolInfo = model.GetSymbolInfo(apmInvocation, cancellationToken);
+                if (symbolInfo.Symbol == null)
+                {
+                    return document;
+                }
 
-                                default:
-                                    Logger.Info("Rewriting to remove state argument:\n{0}", beginXxxCall);
+                var apmSymbol = symbolInfo.Symbol as IMethodSymbol;
+                if (apmSymbol == null)
+                {
+                    return document;
+                }
 
-                                    rewrittenSyntax = RewriteStateArgumentToNull(lambda, syntax, stateArgument);
+                var callbackArgument = FindAsyncCallbackInvocationArgument(apmInvocation, apmSymbol);
+                var callbackExpression = callbackArgument.Expression;
 
-                                    break;
-                            }
+                switch (callbackExpression.Kind())
+                {
+                    case SyntaxKind.SimpleLambdaExpression:
+                        var lambda = (SimpleLambdaExpressionSyntax)callbackExpression;
 
-                            break;
+                        switch (lambda.Body.Kind())
+                        {
+                            case SyntaxKind.Block:
+                                var stateArgument = FindAsyncStateInvocationArgument(apmInvocation, apmSymbol);
+                                switch (stateArgument.Expression.Kind())
+                                {
+                                    case SyntaxKind.NullLiteralExpression:
+                                        Logger.Info("Refactoring:\n{0}", apmInvocation.ContainingMethod());
+                                        rewrittenSyntax = RefactorSimpleLambdaInstance(rewrittenSyntax, apmInvocation, apmSymbol, model, callbackArgument);
+                                        return document.WithSyntaxRoot(rewrittenSyntax);
 
-                        case SyntaxKind.InvocationExpression:
-                            Logger.Info("Rewriting lambda to block form:\n{0}", beginXxxCall);
+                                    default:
+                                        Logger.Info("Rewriting to remove state argument:\n{0}", apmInvocation);
+                                        rewrittenSyntax = RewriteStateArgumentToNull(lambda, rewrittenSyntax, stateArgument);
+                                        break;
+                                }
 
-                            rewrittenSyntax = RewriteInvocationExpressionToBlock(syntax, lambda, model, beginXxxCall);
-                            break;
+                                break;
 
-                        default:
-                            message = String
-                                .Format(
-                                    "Unsupported lambda body kind: {0}: method:\n{1}",
-                                    lambda.Body.Kind(),
-                                    beginXxxCall.ContainingMethod()
-                                );
+                            case SyntaxKind.InvocationExpression:
+                                Logger.Info("Rewriting lambda to block form:\n{0}", apmInvocation);
+                                rewrittenSyntax = RewriteInvocationExpressionToBlock(rewrittenSyntax, lambda, model, apmInvocation, apmSymbol);
+                                break;
 
-                            Logger.Error("Not implemented: {0}", message);
+                            default:
+                                message = String.Format(
+                                        "Unsupported lambda body kind: {0}: method:\n{1}",
+                                        lambda.Body.Kind(),
+                                        apmInvocation.ContainingMethod()
+                                    );
+                                Logger.Error("Not implemented: {0}", message);
+                                return document;
+                        }
 
-                            throw new NotImplementedException(message);
-                    }
+                        break;
 
-                    break;
+                    case SyntaxKind.IdentifierName:
+                    case SyntaxKind.SimpleMemberAccessExpression:
+                        Logger.Info("Rewriting method reference to lambda:\n{0}", apmInvocation);
+                        rewrittenSyntax = RewriteMethodReferenceToSimpleLambda(rewrittenSyntax, apmInvocation, apmSymbol, model, callbackArgument, callbackExpression);
+                        break;
 
-                case SyntaxKind.IdentifierName:
-                case SyntaxKind.SimpleMemberAccessExpression:
-                    Logger.Info("Rewriting method reference to lambda:\n{0}", beginXxxCall);
+                    case SyntaxKind.ParenthesizedLambdaExpression:
+                        Logger.Info("Rewriting parenthesized lambda to simple lambda:\n{0}", apmInvocation);
+                        rewrittenSyntax = RewriteParenthesizedLambdaToSimpleLambda(rewrittenSyntax, apmInvocation, apmSymbol);
+                        break;
 
-                    rewrittenSyntax = RewriteMethodReferenceToSimpleLambda(syntax, beginXxxCall, model, callbackArgument, callbackExpression);
-                    break;
+                    case SyntaxKind.ObjectCreationExpression:
+                        Logger.Info("Rewriting object creation expression to simple lambda:\n{0}", apmInvocation);
+                        var objectCreation = (ObjectCreationExpressionSyntax)callbackExpression;
+                        rewrittenSyntax = RewriteObjectCreationToSimpleLambda(rewrittenSyntax, objectCreation);
+                        break;
 
-                case SyntaxKind.ParenthesizedLambdaExpression:
-                    Logger.Info("Rewriting parenthesized lambda to simple lambda:\n{0}", beginXxxCall);
+                    case SyntaxKind.AnonymousMethodExpression:
+                        Logger.Info("Rewriting anonymous method (delegate) expression to simple lambda:\n{0}", apmInvocation);
+                        var anonymousMethod = (AnonymousMethodExpressionSyntax)callbackExpression;
+                        rewrittenSyntax = RewriteAnonymousMethodToSimpleLambda(rewrittenSyntax, anonymousMethod);
+                        break;
 
-                    rewrittenSyntax = RewriteParenthesizedLambdaToSimpleLambda(syntax, beginXxxCall, model);
-                    break;
+                    case SyntaxKind.NullLiteralExpression:
+                        message = String.Format("callback is null:\n{0}", apmInvocation.ContainingMethod());
+                        Logger.Error("Precondition failed: {0}", message);
+                        return document;
 
-                case SyntaxKind.ObjectCreationExpression:
-                    Logger.Info("Rewriting object creation expression to simple lambda:\n{0}", beginXxxCall);
+                    case SyntaxKind.InvocationExpression:
+                        message = String.Format(
+                                "InvocationExpression as callback is not supported: {0}",
+                                apmInvocation
+                            );
+                        Logger.Error("Precondition failed: {0}", message);
+                        return document;
 
-                    var objectCreation = (ObjectCreationExpressionSyntax)callbackExpression;
+                    case SyntaxKind.GenericName:
+                        message = String.Format("GenericName syntax kind is not supported");
+                        Logger.Error("Precondition failed: {0}", message);
+                        return document;
 
-                    rewrittenSyntax = RewriteObjectCreationToSimpleLambda(syntax, objectCreation, workspace);
-                    break;
-
-                case SyntaxKind.AnonymousMethodExpression:
-                    Logger.Info("Rewriting anonymous method (delegate) expression to simple lambda:\n{0}", beginXxxCall);
-
-                    var anonymousMethod = (AnonymousMethodExpressionSyntax)callbackExpression;
-
-                    rewrittenSyntax = RewriteAnonymousMethodToSimpleLambda(syntax, anonymousMethod, workspace);
-                    break;
-
-                case SyntaxKind.NullLiteralExpression:
-                    message = String.Format("callback is null:\n{0}", beginXxxCall.ContainingMethod());
-
-                    Logger.Error("Precondition failed: {0}", message);
-
-                    throw new PreconditionException(message);
-
-                case SyntaxKind.InvocationExpression:
-                    message = String
-                        .Format(
-                            "InvocationExpression as callback is not supported: {0}",
-                            beginXxxCall
+                    default:
+                        message = String.Format(
+                            "Unsupported actual argument syntax node kind: {0}: callback argument: {1}: in method:\n{2}",
+                            callbackExpression.Kind(),
+                            callbackArgument,
+                            apmInvocation.ContainingMethod()
                         );
-
-                    Logger.Error("Precondition failed: {0}", message);
-
-                    throw new PreconditionException(message);
-
-                case SyntaxKind.GenericName:
-                    message = String.Format("GenericName syntax kind is not supported");
-
-                    Logger.Error("Precondition failed: {0}", message);
-
-                    throw new PreconditionException(message);
-
-                default:
-                    message = String.Format(
-                        "Unsupported actual argument syntax node kind: {0}: callback argument: {1}: in method:\n{2}",
-                        callbackExpression.Kind(),
-                        callbackArgument,
-                        beginXxxCall.ContainingMethod()
-                    );
-
-                    Logger.Error(message);
-
-                    throw new NotImplementedException(message);
+                        Logger.Error(message);
+                        return document;
+                }
             }
-
-            var rewrittenDocument = document.WithSyntaxRoot(rewrittenSyntax);
-            var rewrittenSolution = solution.WithDocumentSyntaxRoot(document.Id, rewrittenSyntax);
 
             //if (rewrittenSolution.CompilationErrorCount() > numErrorsInSolutionBeforeRewriting)
             //{
@@ -196,8 +195,6 @@ namespace Refactoring
 
             //    throw new RefactoringException("Rewritten solution contains more compilation errors than the original refactoring");
             //}
-
-            return RefactorAPMToAsyncAwait(rewrittenDocument, rewrittenSolution, workspace, index);
         }
 
         public static CompilationUnitSyntax RewriteStateArgumentToNull(SimpleLambdaExpressionSyntax lambda, CompilationUnitSyntax syntax, ArgumentSyntax stateArgument)
@@ -315,7 +312,7 @@ namespace Refactoring
                 .Where(name => name.Identifier.ValueText.Equals(lambda.Parameter.Identifier.ValueText));
         }
 
-        public static CompilationUnitSyntax RewriteInvocationExpressionToBlock(CompilationUnitSyntax syntax, SimpleLambdaExpressionSyntax lambda, SemanticModel model, InvocationExpressionSyntax beginXxxCall)
+        public static CompilationUnitSyntax RewriteInvocationExpressionToBlock(CompilationUnitSyntax syntax, SimpleLambdaExpressionSyntax lambda, SemanticModel model, InvocationExpressionSyntax beginXxxCall, IMethodSymbol apmSymbol)
         {
             if (syntax == null) throw new ArgumentNullException("syntax");
             if (lambda == null) throw new ArgumentNullException("lambda");
@@ -324,7 +321,7 @@ namespace Refactoring
 
             var callbackInvocation = (InvocationExpressionSyntax)lambda.Body;
 
-            var stateArgument = FindAsyncStateInvocationArgument(model, beginXxxCall);
+            var stateArgument = FindAsyncStateInvocationArgument(beginXxxCall, apmSymbol);
             var stateExpression = stateArgument.Expression;
 
             var replacements = new List<SyntaxReplacementPair>();
@@ -357,7 +354,7 @@ namespace Refactoring
             return syntax.ReplaceAll(replacements);
         }
 
-        public static CompilationUnitSyntax RewriteMethodReferenceToSimpleLambda(CompilationUnitSyntax syntax, InvocationExpressionSyntax beginXxxCall, SemanticModel model, ArgumentSyntax callbackArgument, ExpressionSyntax callbackExpression)
+        public static CompilationUnitSyntax RewriteMethodReferenceToSimpleLambda(CompilationUnitSyntax syntax, InvocationExpressionSyntax beginXxxCall, IMethodSymbol apmSymbol, SemanticModel model, ArgumentSyntax callbackArgument, ExpressionSyntax callbackExpression)
         {
             if (syntax == null) throw new ArgumentNullException("syntax");
             if (beginXxxCall == null) throw new ArgumentNullException("beginXxxCall");
@@ -365,7 +362,7 @@ namespace Refactoring
 
             var lambdaParamName = FindFreeIdentifier(beginXxxCall.ContainingMethod(), DefaultLambdaParamName);
 
-            var stateArgument = FindAsyncStateInvocationArgument(model, beginXxxCall);
+            var stateArgument = FindAsyncStateInvocationArgument(beginXxxCall, apmSymbol);
             var stateExpression = stateArgument.Expression;
 
             var lambdaParamRef = SyntaxFactory.IdentifierName(lambdaParamName);
@@ -488,12 +485,12 @@ namespace Refactoring
                 .First(stmt => stmt.ToString().Contains("AsyncState"));
         }
 
-        public static CompilationUnitSyntax RewriteParenthesizedLambdaToSimpleLambda(CompilationUnitSyntax syntax, InvocationExpressionSyntax invocation, SemanticModel model)
+        public static CompilationUnitSyntax RewriteParenthesizedLambdaToSimpleLambda(CompilationUnitSyntax syntax, InvocationExpressionSyntax invocation, IMethodSymbol apmSymbol)
         {
             if (syntax == null) throw new ArgumentNullException("syntax");
             if (invocation == null) throw new ArgumentNullException("invocation");
 
-            var callbackArgument = FindAsyncCallbackInvocationArgument(model, invocation);
+            var callbackArgument = FindAsyncCallbackInvocationArgument(invocation, apmSymbol);
             var parenthesizedLambda = (ParenthesizedLambdaExpressionSyntax)callbackArgument.Expression;
 
             var simpleLambda = SyntaxFactory.SimpleLambdaExpression(
@@ -507,11 +504,10 @@ namespace Refactoring
             );
         }
 
-        public static CompilationUnitSyntax RewriteObjectCreationToSimpleLambda(CompilationUnitSyntax syntax, ObjectCreationExpressionSyntax objectCreation, Workspace workspace)
+        public static CompilationUnitSyntax RewriteObjectCreationToSimpleLambda(CompilationUnitSyntax syntax, ObjectCreationExpressionSyntax objectCreation)
         {
             if (syntax == null) throw new ArgumentNullException("syntax");
             if (objectCreation == null) throw new ArgumentNullException("objectCreation");
-            if (workspace == null) throw new ArgumentNullException("workspace");
 
             if (!objectCreation.Type.ToString().Equals("AsyncCallback"))
             {
@@ -541,11 +537,10 @@ namespace Refactoring
             }
         }
 
-        public static CompilationUnitSyntax RewriteAnonymousMethodToSimpleLambda(CompilationUnitSyntax syntax, AnonymousMethodExpressionSyntax anonymousMethod, Workspace workspace)
+        public static CompilationUnitSyntax RewriteAnonymousMethodToSimpleLambda(CompilationUnitSyntax syntax, AnonymousMethodExpressionSyntax anonymousMethod)
         {
             if (syntax == null) throw new ArgumentNullException("syntax");
             if (anonymousMethod == null) throw new ArgumentNullException("anonymousMethod");
-            if (workspace == null) throw new ArgumentNullException("workspace");
 
             if (anonymousMethod.ParameterList.Parameters.Count != 1)
                 throw new ArgumentException("Anonymous method should have single parameter: " + anonymousMethod);
@@ -564,7 +559,7 @@ namespace Refactoring
                 );
         }
 
-        public static CompilationUnitSyntax RefactorSimpleLambdaInstance(CompilationUnitSyntax syntax, InvocationExpressionSyntax beginXxxCall, SemanticModel model, Workspace workspace, ArgumentSyntax callbackArgument)
+        public static CompilationUnitSyntax RefactorSimpleLambdaInstance(CompilationUnitSyntax syntax, InvocationExpressionSyntax beginXxxCall, IMethodSymbol apmSymbol, SemanticModel model, ArgumentSyntax callbackArgument)
         {
             var lambda = (SimpleLambdaExpressionSyntax)callbackArgument.Expression;
 
@@ -573,7 +568,7 @@ namespace Refactoring
 
             var lambdaBlock = (BlockSyntax)lambda.Body;
 
-            var stateArgument = FindAsyncStateInvocationArgument(model, beginXxxCall);
+            var stateArgument = FindAsyncStateInvocationArgument(beginXxxCall, apmSymbol);
             if (stateArgument.Expression.Kind() != SyntaxKind.NullLiteralExpression)
                 throw new PreconditionException("APM Begin method invocation `state' argument must be null - it is now: " + stateArgument.Expression.Kind() + ": " + stateArgument);
 
@@ -591,7 +586,7 @@ namespace Refactoring
 
             if (endStatement != null)
             {
-                return RewriteNotNestedInstance(syntax, beginXxxCall, lambdaBlock, endStatement, methodNameBase, workspace);
+                return RewriteNotNestedInstance(syntax, beginXxxCall, lambdaBlock, endStatement, methodNameBase);
             }
 
             // Every method invocation might lead to the target EndXxx. Try to find it recursively.
@@ -660,20 +655,21 @@ namespace Refactoring
                 )
             );
 
-            return syntax
+            var rewrittenSyntax = syntax
                 .ReplaceAll(replacements)
                 .WithUsingSystemThreadingTasks()
-                .Format(workspace);
+                .WithAdditionalAnnotations(Simplifier.Annotation);
+
+            return rewrittenSyntax;
         }
 
-        private static CompilationUnitSyntax RewriteNotNestedInstance(CompilationUnitSyntax syntax, InvocationExpressionSyntax beginXxxCall, BlockSyntax lambdaBlock, InvocationExpressionSyntax endStatement, string methodNameBase, Workspace workspace)
+        private static CompilationUnitSyntax RewriteNotNestedInstance(CompilationUnitSyntax syntax, InvocationExpressionSyntax beginXxxCall, BlockSyntax lambdaBlock, InvocationExpressionSyntax endStatement, string methodNameBase)
         {
             if (syntax == null) throw new ArgumentNullException("syntax");
             if (beginXxxCall == null) throw new ArgumentNullException("beginXxxCall");
             if (lambdaBlock == null) throw new ArgumentNullException("lambdaBlock");
             if (endStatement == null) throw new ArgumentNullException("endStatement");
             if (methodNameBase == null) throw new ArgumentNullException("methodNameBase");
-            if (workspace == null) throw new ArgumentNullException("workspace");
 
             var originalCallingMethod = beginXxxCall.ContainingMethod();
 
@@ -684,10 +680,12 @@ namespace Refactoring
 
             var newCallingMethod = RewriteOriginatingMethod(beginXxxCall, rewrittenLambdaBlock, methodNameBase, taskName);
 
-            return syntax
+            var newSyntax = syntax
                 .ReplaceNode(originalCallingMethod, newCallingMethod)
                 .WithUsingSystemThreadingTasks()
-                .Format(workspace);
+                .WithAdditionalAnnotations(Simplifier.Annotation);
+
+            return newSyntax;
         }
 
         private static CompilationUnitSyntax WithUsingSystemThreadingTasks(this CompilationUnitSyntax syntax)
@@ -1081,56 +1079,19 @@ namespace Refactoring
             return null;
         }
 
-        private static ArgumentSyntax FindInvocationArgument(SemanticModel model, InvocationExpressionSyntax invocation, string parameterTypeName)
+        public static ArgumentSyntax FindAsyncCallbackInvocationArgument(InvocationExpressionSyntax invocation, IMethodSymbol methodSymbol)
         {
-            if (model == null) throw new ArgumentNullException("model");
-            if (invocation == null) throw new ArgumentNullException("invocation");
-            if (parameterTypeName == null) throw new ArgumentNullException("parameterTypeName");
+            const string parameterTypeName = "System.AsyncCallback";
 
-            IMethodSymbol symbol;
-            try
-            {
-                symbol = model.LookupMethodSymbol(invocation);
-            }
-            catch (SymbolMissingException e)
-            {
-                Logger.Trace("No symbol found for invocation: {0}", invocation, e);
-                throw new ArgumentException("No symbol found for invocation: " + invocation, e);
-            }
-
-            var parameterIndex = FindMethodParameterIndex(symbol, parameterTypeName);
+            var parameterIndex = FindMethodParameterIndex(methodSymbol, parameterTypeName);
             var callbackArgument = invocation.ArgumentList.Arguments.ElementAt(parameterIndex);
 
             return callbackArgument;
         }
 
-        public static ArgumentSyntax FindAsyncCallbackInvocationArgument(SemanticModel model, InvocationExpressionSyntax invocation)
+        public static ArgumentSyntax FindAsyncStateInvocationArgument(InvocationExpressionSyntax invocation, IMethodSymbol apmSymbol)
         {
-            if (model == null) throw new ArgumentNullException("model");
-            if (invocation == null) throw new ArgumentNullException("invocation");
-
-            const string parameterTypeName = "System.AsyncCallback";
-
-            return FindInvocationArgument(model, invocation, parameterTypeName);
-        }
-
-        public static ArgumentSyntax FindAsyncStateInvocationArgument(SemanticModel model, InvocationExpressionSyntax invocation)
-        {
-            if (model == null) throw new ArgumentNullException("model");
-            if (invocation == null) throw new ArgumentNullException("invocation");
-
-            IMethodSymbol symbol;
-            try
-            {
-                symbol = model.LookupMethodSymbol(invocation);
-            }
-            catch (SymbolMissingException e)
-            {
-                Logger.Trace("No symbol found for invocation: {0}", invocation, e);
-                throw new ArgumentException("No symbol found for invocation: " + invocation, e);
-            }
-
-            var parameterIndex = FindMethodParameterIndex(symbol, "object", "state");
+            var parameterIndex = FindMethodParameterIndex(apmSymbol, "object", "state");
             var callbackArgument = invocation.ArgumentList.Arguments.ElementAt(parameterIndex);
 
             return callbackArgument;
@@ -1346,7 +1307,7 @@ namespace Refactoring
                 SyntaxFactory.SeparatedList<ArgumentSyntax>(
                     new ArgumentSyntax[] {
                         SyntaxFactory.Argument(expression)
-                    } 
+                    }
                 )
             );
         }
@@ -1414,16 +1375,10 @@ namespace Refactoring
                 .Count(node => node.HasAnnotations("RefactorableAPMInstance"));
         }
 
-        public static InvocationExpressionSyntax GetAnnotatedInvocation(this Document document, int index)
+        public static InvocationExpressionSyntax GetAnnotatedInvocation(this CompilationUnitSyntax root)
         {
-            return document.GetSyntaxRootAsync().Result
-                .DescendantNodes()
-                .OfType<InvocationExpressionSyntax>()
-                .First(
-                    node => node
-                        .GetAnnotations("RefactorableAPMInstance")
-                        .Any(annotation => annotation.Data == index+"")
-                );
+            var temp = root.GetAnnotatedNodes(apmAnnotation).FirstOrDefault(a => a.Kind() == SyntaxKind.InvocationExpression);
+            return temp == null ? null : (InvocationExpressionSyntax) temp;
         }
 
         public static int GetStartLineNumber(this SyntaxNode node)

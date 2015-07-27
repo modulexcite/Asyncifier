@@ -3,7 +3,6 @@ using Microsoft.CodeAnalysis.MSBuild;
 using System;
 using System.IO;
 using System.Xml;
-using System.Linq;
 namespace Test
 {
     internal class Test1
@@ -18,7 +17,6 @@ namespace Test
             foreach (var solutionPath in solutionPaths)
             {
                 var solution = workspace.OpenSolutionAsync(solutionPath).Result;
-                int a = 0;
                 foreach (var project in solution.Projects)
                 {
                     foreach (var refe in project.MetadataReferences)
