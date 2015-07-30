@@ -32,7 +32,8 @@ namespace Challenges
 
             var x = 0;
             // Code: Do something with x.
-
+            x += 3;
+             
             try
             {
                 // Retrieve the actual result of the asynchronous operation. The
@@ -45,7 +46,7 @@ namespace Challenges
                 // WebException to be thrown. This means that the catch block
                 // cannot be removed when refactoring.
             }
-            catch (WebException e)
+            catch (WebException)
             {
                 // Code: Do something with x.
                 // Because x is scoped in the method Callback, moving this catch

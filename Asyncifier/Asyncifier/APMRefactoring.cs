@@ -931,20 +931,13 @@ namespace Asyncifier
             // TODO: Check for correct signature, etc.
             // This can be done much smarter by e.g. using the BeginXxx method symbol, looking up the corresponding EndXxx symobl, and filtering on that.
 
-            try
-            {
-                // TODO: Also considier IdentifierName EndXxx instances.
-                var endXxxExpression = lambdaBlock.DescendantNodes()
-                                                  .OfType<MemberAccessExpressionSyntax>()
-                                                  .Where(node => NodeIsNotContainedInLambdaExpression(node, lambdaBlock))
-                                                  .First(stmt => stmt.Name.ToString().Equals("End" + methodNameBase));
+            // TODO: Also considier IdentifierName EndXxx instances.
+            var endXxxExpression = lambdaBlock.DescendantNodes()
+                                              .OfType<MemberAccessExpressionSyntax>()
+                                              .Where(node => NodeIsNotContainedInLambdaExpression(node, lambdaBlock))
+                                              .FirstOrDefault(stmt => stmt.Name.ToString().Equals("End" + methodNameBase));
 
-                return (InvocationExpressionSyntax)endXxxExpression.Parent;
-            }
-            catch (InvalidOperationException)
-            {
-                return null;
-            }
+            return endXxxExpression == null ? null : (InvocationExpressionSyntax) endXxxExpression.Parent;
         }
 
         /// <summary>

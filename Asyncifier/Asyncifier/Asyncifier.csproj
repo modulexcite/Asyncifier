@@ -140,6 +140,10 @@
     <Analyzer Include="..\..\..\nugetPackages\Microsoft.CodeAnalysis.Analyzers.1.0.0\analyzers\dotnet\cs\Microsoft.CodeAnalysis.CSharp.Analyzers.dll" />
   </ItemGroup>
   <ItemGroup>
+    <ProjectReference Include="..\..\..\RoslynUtilities\RoslynUtilities\RoslynUtilities.csproj">
+      <Project>{b22fb367-898d-496f-b6bd-b79ee49b35ba}</Project>
+      <Name>RoslynUtilities</Name>
+    </ProjectReference>
     <ProjectReference Include="..\..\Utilities\Utilities.csproj">
       <Project>{d943c4fb-5af0-4965-95a6-7dd36977b63b}</Project>
       <Name>Utilities</Name>

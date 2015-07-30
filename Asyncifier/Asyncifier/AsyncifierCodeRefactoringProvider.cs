@@ -7,7 +7,7 @@ using Microsoft.CodeAnalysis.CodeActions;
 using Microsoft.CodeAnalysis.CodeRefactorings;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
-using Microsoft.CodeAnalysis.Rename;
+using RoslynUtilities;
 
 namespace Asyncifier
 {
@@ -20,8 +20,25 @@ namespace Asyncifier
 
             var node = root.FindNode(context.Span);
 
-            var invocationExpr = node as InvocationExpressionSyntax;
-            if (invocationExpr == null)
+            var identifier = node as IdentifierNameSyntax;
+            if (identifier == null)
+            {
+                return;
+            }
+
+            if (!identifier.Identifier.ValueText.StartsWith("Begin"))
+            {
+                return;
+            }
+
+            var simpleMember = identifier.Parent as MemberAccessExpressionSyntax;
+            if (simpleMember == null)
+            {
+                return;
+            }
+
+            var invocation = simpleMember.Parent as InvocationExpressionSyntax;
+            if (invocation == null)
             {
                 return;
             }
@@ -32,7 +49,27 @@ namespace Asyncifier
                 return;
             }
 
-            var action = CodeAction.Create("Refactor to async/await", c => context.Document.RefactorAPMToAsyncAwait(cmUnit, invocationExpr, c));
+            var model = await context.Document.GetSemanticModelAsync(context.CancellationToken);
+            if (model == null)
+            {
+                return;
+            }
+
+            var symbolInfo = model.GetSymbolInfo(invocation, context.CancellationToken);
+            if (symbolInfo.Symbol == null)
+            {
+                return;
+            }
+
+            var symbol = symbolInfo.Symbol as IMethodSymbol;
+            if (symbol == null || !symbol.IsAPMBeginMethod())
+            {
+                return;
+            }
+
+
+
+            var action = CodeAction.Create("Refactor to async/await", c => context.Document.RefactorAPMToAsyncAwait(cmUnit, invocation, c));
             context.RegisterRefactoring(action);
         }
     }
