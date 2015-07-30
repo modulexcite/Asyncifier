@@ -3,6 +3,7 @@ using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Symbols;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.CodeAnalysis.Simplification;
+using Microsoft.CodeAnalysis.Formatting;
 using NLog;
 using System;
 using System.Collections.Generic;
@@ -92,7 +93,7 @@ namespace Asyncifier
                                 {
                                     case SyntaxKind.NullLiteralExpression:
                                         Logger.Info("Refactoring:\n{0}", apmInvocation.ContainingMethod());
-                                        rewrittenSyntax = RefactorSimpleLambdaInstance(rewrittenSyntax, apmInvocation, apmSymbol, model, callbackArgument);
+                                        rewrittenSyntax = RefactorSimpleLambdaInstance(rewrittenSyntax, apmInvocation, apmSymbol, model, callbackArgument).WithAdditionalAnnotations(Formatter.Annotation);
                                         return document.WithSyntaxRoot(rewrittenSyntax);
 
                                     default:

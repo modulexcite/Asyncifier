@@ -67,8 +67,6 @@ namespace Asyncifier
                 return;
             }
 
-
-
             var action = CodeAction.Create("Refactor to async/await", c => context.Document.RefactorAPMToAsyncAwait(cmUnit, invocation, c));
             context.RegisterRefactoring(action);
         }
